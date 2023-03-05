@@ -1,0 +1,1052 @@
+---
+title: AN ANALYTICAL FRAMEWORK FOR FOOTBALL MATCH RESULT PREDICTION IN ENGLISH PREMIER
+  LEAGUE AND FANTASY FOOTBALL LEAGUE USING MACHINE LEARNING ALGORITHMS
+author: "Olanike Makinde"
+date: "2023-01-04"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#*********************************************
+#EPL FOOTBALL GAME PREDICTION
+
+#*********************************************
+getwd()
+
+#*********************************************
+#*Input Dataset
+#*********************************************
+df <- read.csv("EPLDataset.csv")
+
+df
+#*********************************************
+#load all libraries
+
+#*********************************************
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(recipes)
+library(lattice)
+library(e1071)
+library(Hmisc)
+library(readxl)
+library(survival)
+library(mltools)
+library(ggcorrplot)
+library(psych)
+library(class)
+library(gmodels)
+library(scatterplot3d)
+library(ggcorrplot)
+library(gtsummary)
+library(varImp)
+library(randomForest)
+library(ROSE)
+library(naivebayes)
+library(party)
+library(xgboost)
+library(Matrix)
+library(magrittr)
+library(caTools)
+library(moments)
+library(pROC)
+
+ncol(df) # To check for dataset column
+
+nrow(df) #To check for dataset row
+
+head(df)
+
+tail(df)
+
+```
+#************DATA EXPLORATION*********************
+
+```{r pressure, echo=TRUE}
+
+describe(df) #To check for data description
+
+summary(df) #To check the summary of the variables in the dataset
+
+#tbl_summary(dfa)
+
+duplicated(df)
+
+which(duplicated(df))
+
+
+sapply(df,class) # To check the class of variables in the dataset
+
+str (df) # To have an understanding of the data
+
+dfa = subset(df, select = -c(matchweek,season)) #To drop the last two variables matchweek and season
+
+dfa
+
+duplicated(dfa) #To check for duplicate rows
+
+which(duplicated(dfa))#To check for duplicate rows
+
+
+
+table(dfa$winner) #To check the distribution of the target variable
+
+#To get the percentage of the target variable
+
+round (prop.table(table(dfa$winner))*100,)
+
+barplot(prop.table(table(dfa$winner))*100, main="Target Distribution", xlab = "Winner", ylab = "Count")
+
+summary(dfa)
+
+D <- dfa
+
+atr <- attributes(dfa)
+
+```
+
+# Pre-processing the dataset
+
+```{r}
+for (i in 1:(ncol (dfa) -1)){
+  if (is.character(dfa[, i]) ==TRUE) {
+    for(j in 1:nrow(dfa)) {
+      ascis <- as.numeric(charToRaw(dfa[j, i]))
+      dfa[j, i] <- sum(ascis)
+    }
+  }
+  dfa[, i] <- as.numeric(dfa[,i])
+}
+
+#coding the factor variable
+
+dfa [, ncol (dfa)] <- as.factor (dfa[,ncol(dfa)])
+
+#To create variable x to attach to the input
+
+x <- dfa [, 1 :ncol(dfa) -1 ]
+
+#To create variable y and attach to the output
+
+y <- dfa [, ncol(dfa)]
+
+
+```
+#Evaluation Metrics Functions
+
+```{r}
+ZeroOneLoss <- function(y_pred, y_true) {
+  ZeroOneLoss <- mean(y_true != y_pred)
+  return(ZeroOneLoss)
+}
+
+
+Accuracy <- function(y_pred, y_true) {
+  Accuracy <- mean(y_true == y_pred)
+  return(Accuracy)
+}
+
+
+ConfusionMatrix <- function(y_pred, y_true) {
+  Confusion_Mat <- table(y_true, y_pred)
+  return(Confusion_Mat)
+}
+
+
+
+ConfusionDF <- function(y_pred, y_true) {
+  Confusion_DF <- transform(as.data.frame(ConfusionMatrix(y_pred, y_true)),
+                            y_true = as.character(y_true),
+                            y_pred = as.character(y_pred),
+                            Freq = as.integer(Freq))
+  return(Confusion_DF)
+}
+utils::globalVariables("Freq")
+
+
+Precision <- function(y_true, y_pred, positive = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  TP <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive),"Freq"])
+  FP <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]))
+  Precision <- TP/(TP+FP)
+  return(Precision)
+}
+
+
+Precision_micro <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  TP <- c()
+  FP <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # it may happen that a label is never predicted (missing from y_pred) but exists in y_true
+    # in this case ConfusionDF will not have these lines and thus the simplified code crashes
+    # TP[i] <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+    # FP[i] <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]))
+    
+    # workaround:
+    # i don't want to change ConfusionDF since i don't know if the current behaviour is a feature or a bug.
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP[i] <- if (length(tmp)==0) 0 else as.integer(tmp)
+    
+    tmp <- Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]
+    FP[i] <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+  }
+  Precision_micro <- sum(TP) / (sum(TP) + sum(FP))
+  return(Precision_micro)
+}
+
+
+Precision_macro <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  Prec <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # it may happen that a label is never predicted (missing from y_pred) but exists in y_true
+    # in this case ConfusionDF will not have these lines and thus the simplified code crashes
+    # Prec[i] <- Precision(y_true, y_pred, positive = labels[i])
+    
+    # workaround:
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP <- if (length(tmp)==0) 0 else as.integer(tmp)
+    tmp <- Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]
+    FP <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+    
+    Prec[i] <- TP/(TP+FP)
+  }
+  Prec[is.na(Prec)] <- 0
+  Precision_macro <- mean(Prec) # sum(Prec) / length(labels)
+  return(Precision_macro)
+}
+
+Precision_macro_weighted <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  Prec <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # it may happen that a label is never predicted (missing from y_pred) but exists in y_true
+    # in this case ConfusionDF will not have these lines and thus the simplified code crashes
+    # Prec[i] <- Precision(y_true, y_pred, positive = labels[i])
+    
+    # workaround:
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP <- if (length(tmp)==0) 0 else as.integer(tmp)
+    tmp <- Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]
+    FP <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+    
+    Prec[i] <- TP/(TP+FP)
+  }
+  Prec[is.na(Prec)] <- 0
+  Precision_macro_weighted <- weighted.mean(Prec, as.vector(table(y_true)[labels])) # sum(Prec) / length(labels)
+  return(Precision_macro_weighted)
+}
+
+Recall_FTR <- function(y_true, y_pred, positive = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  TP <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+  FN <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]))
+  Recall <- TP/(TP+FN)
+  return(Recall)
+}
+
+Recall_micro <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  TP <- c()
+  FN <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # short version, comment out due to bug or feature of Confusion_DF
+    # TP[i] <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+    # FP[i] <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]))
+    
+    # workaround:
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP[i] <- if (length(tmp)==0) 0 else as.integer(tmp)
+    
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]
+    FN[i] <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+  }
+  Recall_micro <- sum(TP) / (sum(TP) + sum(FN))
+  return(Recall_micro)
+}
+
+Recall_macro <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  Rec <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # short version, comment out due to bug or feature of Confusion_DF
+    # TP[i] <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+    # FP[i] <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]))
+    
+    # workaround:
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP <- if (length(tmp)==0) 0 else as.integer(tmp)
+    
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]
+    FN <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+    
+    Rec[i] <- TP/(TP+FN)
+  }
+  
+  Rec[is.na(Rec)] <- 0
+  Recall_macro <- mean(Rec) # sum(Rec) / length(labels)
+  return(Recall_macro)
+}
+
+Recall_macro_weighted <- function(y_true, y_pred, labels = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred))
+  # this is not bulletproof since there might be labels missing (in strange cases)
+  # in strange cases where they existed in training set but are missing from test ground truth and predictions.
+  
+  Rec <- c()
+  for (i in c(1:length(labels))) {
+    positive <- labels[i]
+    
+    # short version, comment out due to bug or feature of Confusion_DF
+    # TP[i] <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+    # FP[i] <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]))
+    
+    # workaround:
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"]
+    TP <- if (length(tmp)==0) 0 else as.integer(tmp)
+    
+    tmp <- Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]
+    FN <- if (length(tmp)==0) 0 else as.integer(sum(tmp))
+    
+    Rec[i] <- TP/(TP+FN)
+  }
+  
+  Rec[is.na(Rec)] <- 0
+  Recall_macro_weighted <- weighted.mean(Rec, as.vector(table(y_true)[labels])) # sum(Rec) / length(labels)
+  return(Recall_macro_weighted)
+}
+
+Sensitivity  <- function(y_true, y_pred, positive = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  TP <- as.integer(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred==positive), "Freq"])
+  FN <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true==positive & Confusion_DF$y_pred!=positive), "Freq"]))
+  Sensitivity <- TP/(TP+FN)
+  return(Sensitivity)
+}
+
+Specificity  <- function(y_true, y_pred, positive = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  TN <- as.integer(Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred!=positive), "Freq"])
+  FP <- as.integer(sum(Confusion_DF[which(Confusion_DF$y_true!=positive & Confusion_DF$y_pred==positive), "Freq"]))
+  Specificity <- TN/(TN+FP)
+  return(Specificity)
+}
+
+
+
+F1_Score <- function(y_true, y_pred, positive = NULL) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  Precision <- Precision(y_true, y_pred, positive)
+  Recall <- Recall(y_true, y_pred, positive)
+  F1_Score <- 2 * (Precision * Recall) / (Precision + Recall)
+  return(F1_Score)
+}
+
+
+
+F1_Score_micro <- function(y_true, y_pred, labels = NULL) {
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred)) # possible problems if labels are missing from y_*
+  Precision <- Precision_micro(y_true, y_pred, labels)
+  Recall <- Recall_micro(y_true, y_pred, labels)
+  F1_Score_micro <- 2 * (Precision * Recall) / (Precision + Recall)
+  return(F1_Score_micro)
+}
+
+F1_Score_macro <- function(y_true, y_pred, labels = NULL) {
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred)) # possible problems if labels are missing from y_*
+  Precision <- Precision_macro(y_true, y_pred, labels)
+  Recall <- Recall_macro(y_true, y_pred, labels)
+  F1_Score_macro <- 2 * (Precision * Recall) / (Precision + Recall)
+  return(F1_Score_macro)
+}
+
+F1_Score_macro_weighted <- function(y_true, y_pred, labels = NULL) {
+  if (is.null(labels) == TRUE) labels <- unique(c(y_true, y_pred)) # possible problems if labels are missing from y_*
+  Precision <- Precision_macro_weighted(y_true, y_pred, labels)
+  Recall <- Recall_macro_weighted(y_true, y_pred, labels)
+  F1_Score_macro_weighted <- 2 * (Precision * Recall) / (Precision + Recall)
+  return(F1_Score_macro_weighted)
+}
+
+
+FBeta_Score <- function(y_true, y_pred, positive = NULL, beta = 1) {
+  Confusion_DF <- ConfusionDF(y_pred, y_true)
+  if (is.null(positive) == TRUE) positive <- as.character(Confusion_DF[1,1])
+  Precision <- Precision(y_true, y_pred, positive)
+  Recall <- Recall(y_true, y_pred, positive)
+  Fbeta_Score <- (1 + beta^2) * (Precision * Recall) / (beta^2 * Precision + Recall)
+  return(Fbeta_Score)
+}
+
+LogLoss <- function(y_pred, y_true) {
+  eps <- 1e-15
+  y_pred <- pmax(pmin(y_pred, 1 - eps), eps)
+  LogLoss <- -mean(y_true * log(y_pred) + (1 - y_true) * log(1 - y_pred))
+  return(LogLoss)
+}
+
+MultiLogLoss <- function(y_pred, y_true) {
+  if (is.matrix(y_true) == FALSE) {
+    y_true <- model.matrix(~ 0 + ., data.frame(as.character(y_true)))
+  }
+  eps <- 1e-15
+  N <- nrow(y_pred)
+  y_pred <- pmax(pmin(y_pred, 1 - eps), eps)
+  MultiLogLoss <- (-1 / N) * sum(y_true * log(y_pred))
+  return(MultiLogLoss)
+}
+
+AUC <- function(y_pred, y_true) {
+  rank <- rank(y_pred)
+  n_pos <- as.double(sum(y_true == 1))
+  n_neg <- as.double(sum(y_true == 0))
+  AUC <- (sum(rank[y_true == 1]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+  return(AUC)
+}
+
+
+```
+#************Data Visualization***********************
+
+```{r}
+#To create a whisker plot for the variable of the home_team
+boxplot(dfa[,9])
+
+#To create a whisker plot for the variable of the away_team 
+boxplot(dfa[,27])
+
+#Creating box plot for the some variables field from field (1 - 5)
+#par(mfrow=c(3,6))
+#for(i in 3:6) {
+boxplot(x[,i], main=names(dfa) [i])
+#}
+
+#***** To check for outliers in EPL Dataset
+
+boxplot(dfa)  
+
+boxplot(dfa$home_shots,main="Boxplot visualisation",
+        xlab="home_shots", ylab="Values")
+
+
+
+boxplot(dfa$away_shots,main="Boxplot visualisation",
+        xlab="away_shots", ylab="Values")
+
+
+
+
+
+summary(dfa)
+#boxplot(dfa)
+
+#boxplot(dfb[,9])
+
+#To create a bar plot to breakdown my output attribute
+plot(y)
+
+head(dfa) 
+
+#Finding Correlation OF the variables
+correlationmatrix <- cor(dfa[,1:ncol(dfa)-1])
+ggcorrplot(correlationmatrix)
+
+
+#To explore the relationship of the variables between the target variable***************
+
+ggplot(dfa, aes(home_goals,winner)) +geom_point()
+
+featurePlot(x= x, y=y)
+
+x1 <- df$home_shots_on_target
+y1 <- df$home_goals
+
+plot(x1,y1, main = "Scatter Plot of home_shot_on_target vs HOME GOALS", xlab ="HOME_SHOT_TARGET", ylab = " HOME GOALS", pch = 19, frame =FALSE)
+
+scatterplot3d(x1, y1, pch = 16)
+
+```
+
+#*******Shapiro test to check for the normality of the dataset*****
+```{r}
+dplyr <- sample_n(dfa,4938)
+
+dplyr
+
+shapiro.test(dfa$home_goals)
+
+set.seed(123)
+
+
+dfa_skew  <- rnorm(dfa) 
+skewness(dfa_skew)
+
+set.seed(123)
+hist(dfa_skew, prob = TRUE)                   # Draw histogram with density
+lines(density(dfa_skew), col = 2, lwd = 3)
+
+
+```
+#Summarize data set to apply machine learning
+
+```{r}
+#Summarize data set to apply machine learning
+
+
+
+#To use normalized dataset
+
+dfa[,1:(ncol(dfa)-1)] <- scale(dfa[,1:(ncol(dfa)-1)])
+
+dfa
+
+summary(dfa)
+
+
+
+
+summary(dfa)
+boxplot(dfa)
+
+
+
+
+
+
+
+
+
+#*************To create train and test data set on all variables on the data set*********************
+set.seed(123)
+
+
+
+split <- sample(2,nrow(dfa), replace = TRUE, prob = c(0.7, 0.3))
+
+
+dfa_train_set <- subset(dfa, split == 1)
+dfa_test_set <- subset(dfa, split == 2)  
+
+
+
+#******To apply the Knn algorithm******
+
+# set.seed(123)
+# 
+# dfa_n_pred <- knn(dfa_train_set, dfa_test_set, dfa_train_set$winner, k=68)
+# 
+# dfa_n_pred
+# 
+# table(dfa_n_pred, dfa_test_set$winner)
+
+
+set.seed(123)
+control1 <- trainControl (method="repeatedcv", repeats = 10)
+metric <- "Accuracy"
+
+dfa.knn <- train(winner ~ ., data = dfa_train_set, method = "knn", trControl = control1)
+dfa_n_pred <- predict(dfa.knn, dfa_test_set)
+
+
+
+
+
+#**********KNN Confusion Matrix***************
+
+#cm <- confusionMatrix(dfa_n_pred, dfa_test_set$winner)
+
+#cm
+
+cm_knn <- confusionMatrix(dfa_n_pred, dfa_test_set$winner)
+
+cm_knn
+
+
+F1_knn <- F1_Score_macro(dfa_test_set$winner, dfa_n_pred, labels = NULL)
+
+F1_knn
+
+AUC_Knn <- AUC(dfa_test_set$winner, dfa_n_pred)
+
+AUC_Knn
+
+#******Apply Random Forest Algorithm******
+
+set.seed(123)
+dfa_RFM <- randomForest(winner~.,data = dfa_train_set)
+
+dfa_RFM
+
+varImpPlot(dfa_RFM)
+
+#**********Confusion Matrix***************
+
+set.seed(123)
+dfa_RFM_pred <- predict(dfa_RFM,dfa_test_set)
+
+
+CM_RF <- confusionMatrix(dfa_RFM_pred,dfa_test_set$winner)
+
+CM_RF
+
+F1_RF <- F1_Score_macro(dfa_RFM_pred,dfa_test_set$winner, labels = NULL)
+
+F1_RF
+
+AUC_RF <- AUC(dfa_RFM_pred,dfa_test_set$winner)
+
+AUC_RF
+
+#*******To apply Naive Bayes Algorithm*************
+
+set.seed(123)
+dfa_NB <- naive_bayes(winner~.,data = dfa_train_set,laplace=1)
+
+dfa_NB
+
+#**********Confusion Matrix***************
+
+set.seed(123)
+dfa_NB_pred <- predict(dfa_NB,dfa_test_set)
+
+
+CM_NB <- confusionMatrix(dfa_NB_pred,dfa_test_set$winner)
+
+
+CM_NB
+
+F1_NB <- F1_Score_macro(dfa_NB_pred,dfa_test_set$winner, labels = NULL)
+
+F1_NB
+
+AUC_NB <- AUC(dfa_NB_pred,dfa_test_set$winner)
+
+AUC_NB
+
+
+
+#*******To apply Decision Tree Algorithm******
+set.seed(123)
+dfa_DT <- ctree(winner~.,data = dfa_train_set ,controls = ctree_control(mincriterion=0.99, minsplit=500))
+
+
+dfa_DT
+plot(dfa_DT)
+
+
+#**********Confusion Matrix***************
+
+dfa_DT_pred <- predict(dfa_DT,dfa_test_set)
+
+
+CM_DT <- confusionMatrix(dfa_DT_pred,dfa_test_set$winner)
+
+CM_DT
+
+F1_DT <- F1_Score_macro(dfa_DT_pred,dfa_test_set$winner, labels = NULL)
+
+F1_DT
+
+AUC_DT <- AUC(dfa_DT_pred,dfa_test_set$winner)
+
+AUC_DT
+
+```
+#*********Model Improvement Feature Selection***************************
+
+```{r}
+#*********Model Improvement Feature Selection***************************
+
+#*******ALGORITHM WITH 18 VARIABLES*********
+
+#*****************To Create Train and Test Data********************
+
+
+set.seed(123)
+
+
+dfa_FS <- subset(dfa, select = -c(home_team,away_team,home_fouls,home_corner,away_corner,home_off,away_off,home_red,away_red,home_yellow,away_yellow))
+
+
+dfa_FS
+
+set.seed(123)
+
+
+split <- sample(2,nrow(dfa_FS), replace = TRUE, prob = c(0.7, 0.3))
+
+
+
+dfa_train_set_s <- subset(dfa_FS, split == 1)
+dfa_test_set_s <- subset(dfa_FS, split == 2) 
+
+
+
+
+
+#******To apply the Knn algorithm ON FS************
+
+
+set.seed(123)
+control <- trainControl (method="repeatedcv", repeats = 10)
+metric <- "Accuracy"
+
+dfa.knn_FS <- train(winner ~ ., data = dfa_train_set_s, method = "knn", trControl = control)
+dfa_KNN_pred <- predict(dfa.knn_FS, dfa_test_set_s)
+
+
+
+
+#**********KNN FS Confusion Matrix***************
+
+
+
+
+cm_knn_N <- confusionMatrix(dfa_KNN_pred, dfa_test_set_s$winner)
+
+cm_knn_N
+
+
+F1_Knn_FS <- F1_Score_macro(dfa_KNN_pred, dfa_test_set_s$winner, labels = NULL)
+
+F1_Knn_FS
+
+AUC_Knn_FS <- AUC(dfa_KNN_pred, dfa_test_set_s$winner)
+
+AUC_Knn_FS
+
+
+
+
+
+
+#******Apply Random Forest Algorithm ON FS*********
+
+set.seed(123)
+dfa_RFM_FS <- randomForest(winner~.,data = dfa_train_set_s)
+
+dfa_RFM_FS
+
+#**********RANDOM FOREST Confusion Matrix ON FS***************
+
+RFM_FS_pred <- predict(dfa_RFM_FS,dfa_test_set_s)
+
+
+CM_RF_FS <- confusionMatrix(RFM_FS_pred,dfa_test_set_s$winner)
+
+CM_RF_FS
+
+
+
+#*******To apply Naive Bayes Algorithm ON FS*************
+
+set.seed(123)
+NB_FS <- naive_bayes(winner~.,data = dfa_train_set_s,laplace=1)
+
+NB_FS
+
+#**********Naive Bayes Confusion Matrix on FS***************
+
+NB_FS_pred <- predict(NB_FS,dfa_test_set_s)
+
+
+CM_NB_FS <- confusionMatrix(NB_FS_pred,dfa_test_set_s$winner)
+
+
+CM_NB_FS
+
+#*******To apply Decision Tree Algorithm ON FS**********
+set.seed(123)
+
+DT_FS <- ctree(winner~.,data = dfa_train_set_s,controls = ctree_control(mincriterion=0.99, minsplit=500))
+
+
+DT_FS
+
+plot(DT_FS)
+
+
+#**********Decision Tree Confusion Matrix on FS***************
+
+DT_FS_pred <- predict(DT_FS,dfa_test_set_s)
+
+
+CM_DT_FS <- confusionMatrix(DT_FS_pred,dfa_test_set_s$winner)
+
+CM_DT_FS
+
+
+```
+#Objective 2
+
+#Using the algorithms with the highest accuracy to predict Fantasy Premier League
+
+```{r}
+FP <- read.csv("Fantasydataset.csv")
+
+head(FP)
+
+tail(FP)
+
+summary(FP)
+
+sapply(FP, class)
+
+describe(FP)
+
+which(duplicated(FP))
+
+sum(is.na(FP))
+
+table(FP$total_points)
+
+plot(table(FP$total_points))
+
+round (prop.table(table(FP$total_points))*100,)
+
+
+#******To check for outliers in the dataset***
+
+boxplot(FP[,14])
+
+boxplot(FP$own_goals,main="Boxplot visualisation",
+        xlab="own_goals", ylab="Values")
+
+
+#To create a new target for the dataset
+
+
+FP1<-  mutate(FP,target_point = case_when(total_points > 0 ~ 'win',
+                                          TRUE ~ 'lose' ))
+
+
+
+
+View(FP1)
+
+summary(FP1)
+
+sapply(FP1, class)
+
+
+
+```
+# Pre-processing the dataset
+
+```{r}
+for (i in 1:(ncol (FP1) -1)){
+  if (is.character(FP1[, i]) ==TRUE) {
+    for(j in 1:nrow(FP1)) {
+      ascis <- as.numeric(charToRaw(FP1[j, i]))
+      FP1[j, i] <- sum(ascis)
+    }
+  }
+  FP1[, i] <- as.numeric(FP1[,i])
+}
+
+#coding the factor variable
+
+FP1 [, ncol (FP1)] <- as.factor (FP1[,ncol(FP1)])
+
+#To create variable x to attach to the input
+
+xFP1 <- FP1 [, 1 :ncol(FP1) -1 ]
+
+#To create variable y and attach to the output
+yFP1 <- FP1 [, ncol(FP1)]
+
+
+plot(yFP1)
+
+
+
+
+round (prop.table(table(FP1$target_point))*100,)
+
+barplot(prop.table(table(FP1$target_point))*100, main="Target Distribution", xlab = "target_point", ylab = "Count")
+
+
+summary(FP1)
+
+sapply(FP1, class)
+
+
+```
+#*******To check for skewness of the data
+
+```{r}
+
+set.seed(123)
+
+FP1_skew  <- rnorm(FP1) 
+skewness(FP1_skew)
+
+
+hist(FP1_skew, prob = TRUE)                 # Draw histogram with density
+lines(density(FP1_skew), col = 2, lwd = 3)
+
+
+```
+#To use normalized dataset
+
+```{r}
+
+FP1[,1:(ncol(FP1)-1)] <- scale(FP1[,1:(ncol(FP1)-1)])
+
+FP1
+
+summary(FP1)
+
+
+FPL = subset(FP1, select = -c(total_points)) #To drop the last  variables match week 
+
+FPL
+
+summary(FPL)
+
+
+#Finding Correlation OF the variables
+correlationmatrix <- cor(FPL[,1:ncol(FPL)-1])
+ggcorrplot(correlationmatrix)
+
+
+```
+#************Splitting the data to Training and Test data**********
+
+```{r}
+set.seed(123)
+
+indFPL <- sample(2,nrow(FPL), replace = TRUE, prob = c
+                 (0.7, 0.3))
+
+dfa_FPL_train <- FPL[indFPL==1,]
+dfa_FPL_test <- FPL[indFPL==2,]
+
+```
+#******APPLY RANDOM FOREST ALGORITHM**********
+```{r}
+set.seed(123)
+FPL_RFM <- randomForest(target_point~.,data = dfa_FPL_train )
+
+FPL_RFM
+
+#**********Random Forest Confusion Matrix***************
+
+set.seed(123)
+RFM_FPL_pred <- predict(FPL_RFM,dfa_FPL_test)
+
+
+CM_RF_FPL <- confusionMatrix(dfa_FPL_test$target_point,RFM_FPL_pred)
+
+CM_RF_FPL
+
+```
+#***********Receiver Operating Characteristics(ROC)
+
+```{r}
+
+set.seed(123)
+
+#******Calculate the probability of new observations belonging to each class
+#
+#The new prediction will be a matrix with dimensions data_set-size  number of classes
+
+RFM_FPL_pred2 <- predict(FPL_RFM,dfa_FPL_test, type = "prob")
+
+#Use pretty colours
+
+pretty_colours <- c("#F8766D", "#00BA38")
+
+#Specify the different classes
+
+classes <- levels(dfa_FPL_test$target_point)
+
+#for each class
+
+for (i in 1:2)
+{
+  #Define which observations belong to class[i]  
+  
+  true_values <-
+    ifelse(dfa_FPL_test$target_point ==classes[i],1,0)
+  
+  #Assess the performance of classifier for class[i]
+  
+  pred <-prediction(RFM_FPL_pred2[,i],true_values)
+  perf <- performance(pred, "tpr", "fpr")
+  if (i ==1)
+  {
+    plot(perf,main="ROC Curve", col=pretty_colours[i])
+  }
+  else
+  {
+    plot(perf, main= "ROC Curve",col=pretty_colours[i], add = TRUE)
+  }
+  
+  #calculate the AUC AND PRINT IT TO SCREEN
+  auc.perf <- performance(pred, measure = "auc")
+  print(auc.perf@y.values)
+}
+
+```
+
+```{r}
+
+```
